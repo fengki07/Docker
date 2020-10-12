@@ -1,0 +1,12 @@
+mkdir Dockerfie
+cd Dockerfile
+
+# create an example file
+touch Dockerfile.txt
+
+# build an image using the current directory as context, and a Dockerfile passed through stdin
+docker build -t myimage:latest -f- . <<EOF
+FROM busybox
+COPY Dockerfie.txt .
+RUN cat /Dockerfile.txt
+EOF
