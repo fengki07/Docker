@@ -1,38 +1,146 @@
-# Nginx + LetsEncrypt on Docker
+# Percona MongoDB Exporter
 
-This container provides a nginx with LetsEncypt enabled.  When tested with SSLLabs it should yield and A+ rating.  It supports streaming along with the normal proxying support.
+[![Release](https://img.shields.io/github/release/percona/mongodb_exporter.svg?style=flat)](https://github.com/percona/mongodb_exporter/releases/latest)
+[![Build Status](https://travis-ci.com/percona/mongodb_exporter.svg?branch=master)](https://travis-ci.com/percona/mongodb_exporter)
+[![codecov.io Code Coverage](https://img.shields.io/codecov/c/github/percona/mongodb_exporter.svg?maxAge=2592000)](https://codecov.io/github/percona/mongodb_exporter?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/percona/mongodb_exporter)](https://goreportcard.com/report/github.com/percona/mongodb_exporter)
+[![CLA assistant](https://cla-assistant.percona.com/readme/badge/percona/mongodb_exporter)](https://cla-assistant.percona.com/percona/mongodb_exporter)
 
-## How nginx is initially setup
+Based on [MongoDB exporter](https://github.com/dcu/mongodb_exporter) by David Cuadrado ([@dcu](https://github.com/dcu)), but forked for full sharded support and structure changes.
 
-1. `EMAIL` environment variable specifies the email address that will recieve the notifications when there is a renewal needed
-2. `DOMAINS` environment variable specifies a *comma* separated list of FQDNs for the certificate.  It is expected that the first one would be primary and will be put in the `/etc/letsencrypt/live` folder.  (Comma separated was choses to avoid the hassle of adding extra quotes)
-3. When the `/etc/letsencrypt/live folder` is missing the `init` script will start up `certbot` in standalone mode.  This will create the necessary files to enable SSL.  Otherwise we would require two configuration files for nginx (one with and one without SSL).
+## Features
 
-# Customization points
+- MongoDB Server Status metrics (*cursors, operations, indexes, storage, etc*)
+- MongoDB Replica Set metrics (*members, ping, replication lag, etc*)
+- MongoDB Replication Oplog metrics (*size, length in time, etc*)
+- MongoDB Sharding metrics (*shards, chunks, db/collections, balancer operations*)
+- MongoDB RocksDB storage-engine metrics (*levels, compactions, cache usage, i/o rates, etc*)
+- MongoDB WiredTiger storage-engine metrics (*cache, blockmanger, tickets, etc*)
+- MongoDB Top Metrics per collection (writeLock, readLock, query, etc*)
 
-The `/etc/nginx/conf.d` folder is processed and contains deployment specific configurations done through Docker `configs`.  This is not a volume mount.  This is processed before `deployment.d`.
+### Important Note
 
-The `/etc/nginx/deployment.d` folder is also processed and contains deployment specfific configurations that can be mounted as a volume if desired.
+Metrics `mongodb_mongod_replset_oplog_*` doesn't work in [Master/Slave](https://docs.mongodb.com/v3.4/core/master-slave/) replication mode, because it was *DEPRECATED* in MongoDB `3.2` and removed in `4.0`.
 
-`/etc/nginx/{conf|deployment}.d/{server_name}.conf.*` is expected to contain the virtual server specific configurations.  The default configuration will simply `return 502` (gateway eror) for every request.
+## Building and running
 
-`/etc/nginx/{conf|deployment}.d/*.conf.stream` is expected to contain stream specific configurations which are useful for passing the request / response as is to an upstream server.
+### Prerequisites:
 
-The following is an example of an upstream server called `intranet` which the nginx server will route to if the request is for `i.trajano.net` the `default default_https` is needed to make it do the normal processing specified in the previous paragraph.
+* [Go compiler](https://golang.org/dl/)
+* Docker and [Docker Compose](https://docs.docker.com/compose/)
 
-    upstream intranet {
-        server intranet:443;
-    }
+### Building
 
-    map $ssl_preread_server_name $upstream {
-        default default_https;
-        i.trajano.net intranet;
-    }
+1. Get the code from the Percona repository:
+ 
+    ```bash
+    go get -u github.com/percona/mongodb_exporter
+    ```
 
-## NOTE
+2. Switch to the buld directory and just run ``make`` to install all needed tools, format code with `go fmt`, build a binary for your OS and run tests.:
+ 
+    ```bash
+    cd ${GOPATH-$HOME/go}/src/github.com/percona/mongodb_exporter
+    make
+    ```
 
-* On first initialization there will be no output for a while, this is because the DHPARAM generation takes quite a bit of time combined with the initial certificate generation.
-* The `worker_processes` value is adjusted automatically to the number of available CPUs from *cgroup*, nginx official image hard codes it to `1`.
-* Due to the nature of nginx and SSL certificates, it is not safe to run this configuration with multiple replicas especially when there are renewals.  The `worker_processes` value is adjusted automatically to the number of available CPUs allocated though so it can handle more load.
-* `/.well-known/acme-challenge` URI will points to `/tmp/.well-known/acme-challenge` to provide the challenges required by LetsEncrypt for renewals.
-* Content (including proxied content) will be gzipped in transit to reduce network usage.
+    *Note: Running tests requires ``docker`` (as it uses MongoDB) and ``docker-compose``, and you will also need free ``27017`` port, as ``docker-compose`` maps this port into your host OS while testing.*
+
+    1. If you want just build a binary for your OS without codestyle checks and tests you can run command below:
+
+        ```bash
+        make build
+        ```
+
+    2. If you don't have or don't want to install the whole GO stuff, use this docker build that creates a container with a freshly built `mongodb_exporter` binary:
+
+        ```bash
+        make docker
+        ```
+
+### Running
+
+To define your own MongoDB URL, use environment variable `MONGODB_URI`. If set this variable takes precedence over `--mongodb.uri` flag.
+
+To enable HTTP basic authentication, set environment variable `HTTP_AUTH` to user:password pair. Alternatively, you can
+use YAML file with `server_user` and `server_password` fields.
+
+```bash
+export MONGODB_URI='mongodb://localhost:27017'
+export HTTP_AUTH='user:password'
+./bin/mongodb_exporter [<flags>]
+```
+
+If you are using hidden nodes, connect to them using the `connect=direct` option. Example:
+
+```bash
+./mongodb_exporter --mongodb.uri=admin:admin123456@127.0.0.3:17003/admin/?connect=direct
+```
+
+#### Kubernetes
+
+You can use the chart [prometheus-mongodb-exporter](https://github.com/helm/charts/tree/master/stable/prometheus-mongodb-exporter) from helm stable repository.
+
+### Flags
+
+See the help page with `-h`.
+
+If you use [MongoDB Authorization](https://docs.mongodb.org/manual/core/authorization/), you must:
+
+1. Create a user with '*clusterMonitor*' role and '*read*' on the '*local*' database, like the following (*replace username/password!*):
+
+    ```js
+    db.getSiblingDB("admin").createUser({
+        user: "mongodb_exporter",
+        pwd: "s3cr3tpassw0rd",
+        roles: [
+            { role: "clusterMonitor", db: "admin" },
+            { role: "read", db: "local" }
+        ]
+    })
+    ```
+
+2. Set environment variable `MONGODB_URI` before starting the exporter:
+
+    ```bash
+    export MONGODB_URI=mongodb://mongodb_exporter:s3cr3tpassw0rd@localhost:27017
+    ```
+
+If you use [x.509 Certificates to Authenticate Clients](https://docs.mongodb.com/manual/tutorial/configure-x509-client-authentication/), pass in username and `authMechanism` via [connection options](https://docs.mongodb.com/manual/reference/connection-string/#connections-connection-options) to the MongoDB uri. Eg:
+
+```
+mongodb://CN=myName,OU=myOrgUnit,O=myOrg,L=myLocality,ST=myState,C=myCountry@localhost:27017/?authMechanism=MONGODB-X509
+```
+
+## Note about how this works
+
+Point the process to any mongo port and it will detect if it is a mongos, replicaset member, or stand alone mongod and return the appropriate metrics for that type of node. This was done to prevent the need to an exporter per type of process.
+
+## Roadmap
+
+- Document more configurations options here
+- Stabilize RocksDB and WiredTiger support
+- Move MongoDB user/password/authdb to a file (for security)
+- Write more go tests
+
+
+## Submitting Bug Reports
+
+If you find a bug in Percona MongoDB Exporter or one of the related projects, you should submit a report to that project's [JIRA](https://jira.percona.com) issue tracker.
+
+Your first step should be [to search](https://jira.percona.com/issues/?jql=project=PMM%20AND%20component=MongoDB_Exporter) the existing set of open tickets for a similar report. If you find that someone else has already reported your problem, then you can upvote that report to increase its visibility.
+
+If there is no existing report, submit a report following these steps:
+
+1. [Sign in to Percona JIRA.](https://jira.percona.com/login.jsp) You will need to create an account if you do not have one.
+2. [Go to the Create Issue screen and select the relevant project.](https://jira.percona.com/secure/CreateIssueDetails!init.jspa?pid=11600&issuetype=1&priority=3&components=11603)
+3. Fill in the fields of Summary, Description, Steps To Reproduce, and Affects Version to the best you can. If the bug corresponds to a crash, attach the stack trace from the logs.
+
+An excellent resource is [Elika Etemad's article on filing good bug reports.](http://fantasai.inkedblade.net/style/talks/filing-good-bugs/).
+
+As a general rule of thumb, please try to create bug reports that are:
+
+- *Reproducible.* Include steps to reproduce the problem.
+- *Specific.* Include as much detail as possible: which version, what environment, etc.
+- *Unique.* Do not duplicate existing tickets.
+- *Scoped to a Single Bug.* One bug per report.
